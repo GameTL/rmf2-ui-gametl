@@ -1,5 +1,5 @@
 import { Icon } from '@chakra-ui/react';
-import { MdOutlineTask, MdHome } from 'react-icons/md';
+import { MdOutlineTask, MdHome, MdMap } from 'react-icons/md';
 import { FaNetworkWired } from 'react-icons/fa';
 import { SiUnrealengine } from 'react-icons/si';
 import { GrSystem, GrSchedules } from 'react-icons/gr';
@@ -40,6 +40,13 @@ export const routes: RoutesType[] = [
           />
         ),
         path: '/system/simulation',
+      },
+      {
+        name: 'Map',
+        path: '/system/map',
+        icon: (
+          <Icon as={MdMap} width="20px" height="30px" color="inherit" />
+        ),
       },
     ],
   },

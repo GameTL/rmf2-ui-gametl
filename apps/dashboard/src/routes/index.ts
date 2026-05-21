@@ -40,6 +40,14 @@ export const AdminRoutes: RouteObject[] = [
           return { Component: Simulation };
         },
       },
+      {
+        // Map
+        path: 'map',
+        lazy: async () => {
+          const { Map } = await import('@/pages/dashboard/system/map');
+          return { Component: Map };
+        },
+      },
     ],
   },
   {
