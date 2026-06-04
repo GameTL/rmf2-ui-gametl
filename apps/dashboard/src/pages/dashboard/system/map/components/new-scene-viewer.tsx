@@ -13,7 +13,7 @@ import {
   Switch,
   Text,
 } from '@chakra-ui/react';
-import { LuLocateFixed, LuRotateCcw } from 'react-icons/lu';
+import { LuLocateFixed } from 'react-icons/lu';
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { DRACOLoader } from 'three/addons/loaders/DRACOLoader.js';
@@ -21,8 +21,12 @@ import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { clone as cloneSkeleton } from 'three/addons/utils/SkeletonUtils.js';
 import { ViewportGizmo } from 'three-viewport-gizmo';
 import { Tooltip } from '@/components/ui/tooltip';
+import {
+  ROBOT_TURN_SPEED_RAD,
+  stepDifferentialDrive,
+  type DriveState,
+} from '../differential-drive.demo';
 import { DropPointMarker } from '../drop-point-marker';
-import { NavigationOverlay } from '../navigation-overlay';
 
 const SCENE_URL = '/RMF2_SIM/Test_3.glb';
 const ROBOT_MODEL_URL = '/robot.glb';
@@ -113,6 +117,7 @@ type RobotRuntime = {
   pathIndex: number;
   lastConfigPositionKey: string;
   lastConfigPathKey: string;
+  driveState: DriveState | null;
   blockedBy?: string;
   status: RobotMotionStatus;
 };
@@ -124,7 +129,6 @@ type StaticCollisionBox = {
 
 type SceneViewerApi = {
   setShowGridAxes: (show: boolean) => void;
-  setNavigationEnabled: (enabled: boolean) => void;
   setDropPointEnabled: (enabled: boolean) => void;
   setDropPointPosition: (position: DropPointCoords) => void;
   setRoofSliceEnabled: (enabled: boolean) => void;
@@ -681,13 +685,11 @@ function animateIntroCamera(
 export function SceneViewer() {
   const containerRef = useRef<HTMLDivElement>(null);
   const resetOrbitRef = useRef<(() => void) | null>(null);
-  const resetPathRef = useRef<(() => void) | null>(null);
   const resetRobotsRef = useRef<(() => void) | null>(null);
   const sceneApiRef = useRef<SceneViewerApi | null>(null);
   const [loadState, setLoadState] = useState<LoadState>('loading');
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [showGridAxes, setShowGridAxes] = useState(false);
-  const [showNavigation, setShowNavigation] = useState(true);
   const [showDropPoint, setShowDropPoint] = useState(false);
   const [dropPoint, setDropPoint] = useState<DropPointCoords>({
     x: 0,
@@ -696,23 +698,17 @@ export function SceneViewer() {
   });
   const [sceneDebug, setSceneDebug] = useState<SceneDebugInfo | null>(null);
   const [robotStatuses, setRobotStatuses] = useState<RobotStatus[]>([]);
-  const showNavigationRef = useRef(showNavigation);
   const showDropPointRef = useRef(showDropPoint);
   const dropPointRef = useRef(dropPoint);
   const [showRoofSlice, setShowRoofSlice] = useState(true);
   const [roofSliceHeight, setRoofSliceHeight] = useState(3.4);
 
-  showNavigationRef.current = showNavigation;
   showDropPointRef.current = showDropPoint;
   dropPointRef.current = dropPoint;
 
   useEffect(() => {
     sceneApiRef.current?.setShowGridAxes(showGridAxes);
   }, [showGridAxes, sceneDebug]);
-
-  useEffect(() => {
-    sceneApiRef.current?.setNavigationEnabled(showNavigation);
-  }, [showNavigation, loadState]);
 
   useEffect(() => {
     sceneApiRef.current?.setDropPointEnabled(showDropPoint);
@@ -787,7 +783,6 @@ export function SceneViewer() {
     let disposed = false;
     let loadedScene: THREE.Group | null = null;
     let gridAxesHelpers: THREE.Group | null = null;
-    let navigationOverlay: NavigationOverlay | null = null;
     let dropPointMarker: DropPointMarker | null = null;
     const pickRaycaster = new THREE.Raycaster();
     const pickPointer = new THREE.Vector2();
@@ -866,6 +861,7 @@ export function SceneViewer() {
         root,
         config,
         pathIndex: getInitialPathIndex(config),
+        driveState: null,
         status: config.enabled === false ? 'disabled' : 'idle',
         lastConfigPositionKey: coordKey(config.position),
         lastConfigPathKey: pathKey(config.path),
@@ -906,6 +902,7 @@ export function SceneViewer() {
         if (nextPathKey !== existing.lastConfigPathKey) {
           existing.pathIndex = getInitialPathIndex(config);
           existing.lastConfigPathKey = nextPathKey;
+          existing.driveState = null;
         }
 
         const nextPositionKey = coordKey(config.position);
@@ -925,6 +922,7 @@ export function SceneViewer() {
           existing.root.position.set(position.x, position.y, position.z);
           existing.pathIndex = getInitialPathIndex(config);
           existing.lastConfigPositionKey = nextPositionKey;
+          existing.driveState = null;
         }
 
         applyRobotScale(existing.root, config.scale);
@@ -948,6 +946,7 @@ export function SceneViewer() {
         robot.root.rotation.z = robot.config.rotationZ ?? 0;
 
         robot.pathIndex = getInitialPathIndex(robot.config);
+        robot.driveState = null;
         robot.blockedBy = undefined;
         robot.status = robot.config.enabled === false ? 'disabled' : 'idle';
       }
@@ -983,16 +982,32 @@ export function SceneViewer() {
         if (!activeTarget) continue;
 
         const { target } = activeTarget;
-        const current = robot.root.position.clone();
-        const delta = new THREE.Vector3(
-          target.x - current.x,
-          target.y - current.y,
-          target.z - current.z,
-        );
-        const distance = delta.length();
+        const previousPosition = robot.root.position.clone();
+        const previousHeading = robot.root.rotation.z;
+        const spawnHeading = robot.config.rotationZ ?? previousHeading;
 
-        if (distance <= ROBOT_ARRIVAL_EPSILON) {
-          robot.root.position.set(target.x, target.y, target.z);
+        const stepResult = stepDifferentialDrive({
+          position: { x: previousPosition.x, y: previousPosition.y },
+          z: target.z,
+          target: { x: target.x, y: target.y },
+          state: robot.driveState,
+          initialHeading: spawnHeading,
+          speed: Math.max(robot.config.speed ?? 1, 0),
+          turnSpeed: ROBOT_TURN_SPEED_RAD,
+          arrivalEpsilon: ROBOT_ARRIVAL_EPSILON,
+          deltaSeconds,
+        });
+
+        robot.root.position.set(
+          stepResult.position.x,
+          stepResult.position.y,
+          stepResult.z,
+        );
+        robot.root.rotation.z = stepResult.heading;
+        robot.driveState = stepResult.state;
+
+        if (stepResult.arrived) {
+          robot.driveState = null;
 
           const pathLength = robot.config.path?.length ?? 0;
           if (pathLength > 0) {
@@ -1012,23 +1027,14 @@ export function SceneViewer() {
           continue;
         }
 
-        const direction = delta.normalize();
-        const speed = Math.max(robot.config.speed ?? 1, 0);
-        const step = Math.min(distance, speed * deltaSeconds);
-
-        const previousPosition = robot.root.position.clone();
-        robot.root.position.addScaledVector(direction, step);
-
-        if (Math.abs(direction.x) > 0.001 || Math.abs(direction.y) > 0.001) {
-          robot.root.rotation.z = Math.atan2(direction.y, direction.x);
-        }
-
         const blockedBy = findRobotCollision(robot);
         if (blockedBy) {
           robot.root.position.copy(previousPosition);
+          robot.root.rotation.z = previousHeading;
+          robot.driveState = null;
           robot.blockedBy = blockedBy;
           robot.status = 'blocked';
-        } else {
+        } else if (stepResult.mode === 'turn' || stepResult.mode === 'drive') {
           robot.status = 'moving';
         }
       }
@@ -1079,7 +1085,6 @@ export function SceneViewer() {
       const deltaSeconds = clock.getDelta();
 
       controls.update();
-      navigationOverlay?.tick(deltaSeconds);
 
       updateRobots(deltaSeconds, currentFloorZ);
 
@@ -1124,9 +1129,6 @@ export function SceneViewer() {
           setShowGridAxes(show) {
             if (gridAxesHelpers) gridAxesHelpers.visible = show;
           },
-          setNavigationEnabled(enabled) {
-            navigationOverlay?.setEnabled(enabled);
-          },
           setDropPointEnabled(enabled) {
             dropPointMarker?.setVisible(enabled);
           },
@@ -1149,29 +1151,6 @@ export function SceneViewer() {
         };
 
         try {
-          navigationOverlay = await NavigationOverlay.create({
-            scene,
-            domElement: renderer.domElement,
-            camera,
-            pathUrl: '/navigation-path.json',
-          });
-          // Match the GLTF Y-up → Z-up rotation applied to the floorplan.
-          navigationOverlay.group.rotation.x = Math.PI / 2;
-          navigationOverlay.on('waypoint:selected', ({ waypointId }) => {
-            console.info('[navigation] waypoint:selected', waypointId);
-          });
-          navigationOverlay.on('robot:arrived', ({ goalId }) => {
-            console.info('[navigation] robot:arrived', goalId);
-          });
-          navigationOverlay.setEnabled(showNavigationRef.current);
-          resetPathRef.current = () => {
-            if (navigationOverlay?.isEnabled()) navigationOverlay.reset();
-          };
-        } catch (overlayError) {
-          console.error('Navigation overlay failed to load', overlayError);
-        }
-
-        try {
           robotTemplate = await loadGltfAsync(loader, ROBOT_MODEL_URL);
           tuneMaterials(robotTemplate);
           await refreshRobotConfig(bounds.floorZ);
@@ -1184,8 +1163,6 @@ export function SceneViewer() {
         }
 
         if (disposed) {
-          navigationOverlay?.dispose();
-          navigationOverlay = null;
           return;
         }
 
@@ -1205,12 +1182,8 @@ export function SceneViewer() {
     return () => {
       disposed = true;
       resetOrbitRef.current = null;
-      resetPathRef.current = null;
       resetRobotsRef.current = null;
       sceneApiRef.current = null;
-
-      navigationOverlay?.dispose();
-      navigationOverlay = null;
 
       if (robotConfigTimerId !== null) {
         window.clearInterval(robotConfigTimerId);
@@ -1320,19 +1293,6 @@ export function SceneViewer() {
             </Switch.Root>
             <Switch.Root
               size="sm"
-              colorPalette="purple"
-              checked={showNavigation}
-              disabled={loadState !== 'ready'}
-              onCheckedChange={(details) => setShowNavigation(details.checked)}
-            >
-              <Switch.HiddenInput />
-              <Switch.Control>
-                <Switch.Thumb />
-              </Switch.Control>
-              <Switch.Label fontSize="sm">Robot navigation</Switch.Label>
-            </Switch.Root>
-            <Switch.Root
-              size="sm"
               colorPalette="yellow"
               checked={showDropPoint}
               disabled={loadState !== 'ready'}
@@ -1389,7 +1349,7 @@ export function SceneViewer() {
                 Drop point
               </Text>
               <Text fontSize="xs" color="fg.muted" lineHeight="short">
-                Same world X, Y, Z as navigation-path.json (blue axis = Z up).
+                World X, Y on the floor plane; Z is vertical (blue axis = Z up).
                 Alt+click sets X and Y on the plane at the current Z.
               </Text>
               <Stack gap={2}>
@@ -1612,25 +1572,6 @@ export function SceneViewer() {
             }}
           >
             <LuLocateFixed />
-          </IconButton>
-        </Tooltip>
-        <Tooltip content="Restart path" showArrow>
-          <IconButton
-            aria-label="Restart path"
-            size="sm"
-            variant="surface"
-            colorPalette="purple"
-            pointerEvents="auto"
-            disabled={loadState !== 'ready' || !showNavigation}
-            onClick={() => resetPathRef.current?.()}
-            css={{
-              _icon: {
-                width: '18px',
-                height: '18px',
-              },
-            }}
-          >
-            <LuRotateCcw />
           </IconButton>
         </Tooltip>
         <Tooltip content="Reset all robots" showArrow>

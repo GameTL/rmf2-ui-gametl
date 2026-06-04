@@ -33,16 +33,17 @@ type ServicesStatusKey =
   | 'test_logger_database'
   | 'rts';
 
+const mockServicesConnected =
+  import.meta.env.VITE_NETWORK_MOCK_CONNECTED === 'true';
+
 const ENDPOINT_CONFIGS = {
   broker: {
     base: BrokerStatusConfig.BASE,
     statusPath: '/status',
-    responsePath: (key: string) => `data.${key}.status`,
   },
   rts: {
     base: RTSClientOptions.baseUrl ?? '',
     statusPath: '/status',
-    responsePath: () => 'time_ns',
   },
 } as const;
 
@@ -53,7 +54,6 @@ interface NetworkServiceRow {
   readonly name: string;
   readonly description: string;
   readonly statusKey: ServicesStatusKey;
-  readonly responseKey: string;
   readonly endpoint: EndpointKey;
 }
 
@@ -64,7 +64,6 @@ const NETWORK_SERVICE_ROWS: readonly NetworkServiceRow[] = [
     description:
       'Real-Time Scheduler service for managing and optimizing task schedules',
     statusKey: 'rts',
-    responseKey: 'status',
     endpoint: 'rts',
   },
   {
@@ -72,7 +71,6 @@ const NETWORK_SERVICE_ROWS: readonly NetworkServiceRow[] = [
     name: 'Monitoring Service',
     description: 'Used for monitoring internal IOCS services.',
     statusKey: 'mongodb',
-    responseKey: 'mongodb',
     endpoint: 'broker',
   },
   {
@@ -81,7 +79,6 @@ const NETWORK_SERVICE_ROWS: readonly NetworkServiceRow[] = [
     description:
       'Used for forwarding messages to databases, handling routing and message transformation.',
     statusKey: 'proxy',
-    responseKey: 'redis',
     endpoint: 'broker',
   },
   {
@@ -89,7 +86,6 @@ const NETWORK_SERVICE_ROWS: readonly NetworkServiceRow[] = [
     name: 'Logging Service',
     description: 'Service for storing data into database',
     statusKey: 'rmf_logger',
-    responseKey: 'rmf_logger',
     endpoint: 'broker',
   },
   {
@@ -97,7 +93,6 @@ const NETWORK_SERVICE_ROWS: readonly NetworkServiceRow[] = [
     name: 'RabbitMQ Service',
     description: 'Service bus data broadcasting using exchange ',
     statusKey: 'rabbitmq',
-    responseKey: 'rabbitmq',
     endpoint: 'broker',
   },
   {
@@ -106,7 +101,6 @@ const NETWORK_SERVICE_ROWS: readonly NetworkServiceRow[] = [
     description:
       'Used for Data analytics, NGSI-LD Context broker, IT Connectors Configuration ',
     statusKey: 'postgres',
-    responseKey: 'postgres',
     endpoint: 'broker',
   },
   {
@@ -114,7 +108,6 @@ const NETWORK_SERVICE_ROWS: readonly NetworkServiceRow[] = [
     name: 'Data Model Repository Service',
     description: 'Internal storage for data model ',
     statusKey: 'redis',
-    responseKey: 'redis',
     endpoint: 'broker',
   },
   {
@@ -122,7 +115,6 @@ const NETWORK_SERVICE_ROWS: readonly NetworkServiceRow[] = [
     name: 'IT-Connector Service',
     description: 'IT data pipeline from external data source to context broker',
     statusKey: 'it_connector',
-    responseKey: 'it_connector',
     endpoint: 'broker',
   },
   {
@@ -130,7 +122,6 @@ const NETWORK_SERVICE_ROWS: readonly NetworkServiceRow[] = [
     name: 'EventManager Service',
     description: 'Processes and managers system event triggers',
     statusKey: 'event_mgr',
-    responseKey: 'event_mgr',
     endpoint: 'broker',
   },
 ];
@@ -147,15 +138,18 @@ function parseEndpoint(base: string): { protocol: string; host: string } {
   }
 }
 
-function timeAgo(timeNs: number): string {
-  const diffMs = Date.now() - timeNs / 1_000_000;
-  const secs = Math.floor(diffMs / 1000);
+function timeAgoFromMs(timestampMs: number): string {
+  const secs = Math.floor((Date.now() - timestampMs) / 1000);
   if (secs < 60) return `${secs}s ago`;
   const mins = Math.floor(secs / 60);
   if (mins < 60) return `${mins}m ago`;
   const hours = Math.floor(mins / 60);
   if (hours < 24) return `${hours}h ago`;
   return `${Math.floor(hours / 24)}d ago`;
+}
+
+function timeAgo(timeNs: number): string {
+  return timeAgoFromMs(timeNs / 1_000_000);
 }
 
 const defaultServicesStatus = {
@@ -173,6 +167,21 @@ const defaultServicesStatus = {
   rts: false,
 };
 
+const devConnectedServicesStatus = {
+  proxy: true,
+  mongodb: true,
+  redis: true,
+  rabbitmq: true,
+  postgres: true,
+  it_connector: true,
+  swagger: true,
+  event_mgr: true,
+  rmf_proxy: true,
+  rmf_logger: true,
+  test_logger_database: true,
+  rts: false,
+};
+
 const defaultRtsData = { online: false, timeNs: null as number | null };
 
 const POLL_INTERVAL_MS = 5000;
@@ -181,6 +190,9 @@ export function Network() {
   const [isStartIOCSClicked, setisStartIOCSClicked] = useState(false);
   const [, setTick] = useState(0);
   const [servicesStatus, setServicesStatus] = useState(defaultServicesStatus);
+  const [brokerLastPolledAt, setBrokerLastPolledAt] = useState<number | null>(
+    null,
+  );
   const [rtsData, setRtsData] = useState(defaultRtsData);
 
   useEffect(() => {
@@ -199,6 +211,12 @@ export function Network() {
 
   useEffect(() => {
     const fetchBrokerStatus = async () => {
+      if (mockServicesConnected) {
+        setServicesStatus(devConnectedServicesStatus);
+        setBrokerLastPolledAt(Date.now());
+        return;
+      }
+
       try {
         const response = await fetch(BrokerStatusConfig.BASE + '/status', {
           method: 'GET',
@@ -206,21 +224,23 @@ export function Network() {
         });
         const data = await response.json();
         setServicesStatus({
-          proxy: data.data.redis.status,
-          mongodb: data.data.mongodb.status,
-          redis: data.data.redis.status,
-          rabbitmq: data.data.rabbitmq.status,
-          postgres: data.data.postgres.status,
-          it_connector: data.data.it_connector.status,
-          swagger: data.data.swagger.status,
-          event_mgr: data.data.event_mgr.status,
-          rmf_proxy: data.data.rmf_proxy.status,
-          rmf_logger: data.data.rmf_logger.status,
-          test_logger_database: data.data['test-logger-database'].status,
+          proxy: data.redis.status,
+          mongodb: data.mongodb.status,
+          redis: data.redis.status,
+          rabbitmq: data.rabbitmq.status,
+          postgres: data.postgres.status,
+          it_connector: data.it_connector.status,
+          swagger: data.swagger.status,
+          event_mgr: data.event_mgr.status,
+          rmf_proxy: data.rmf_proxy.status,
+          rmf_logger: data.rmf_logger.status,
+          test_logger_database: data['test-logger-database'].status,
           rts: false,
         });
+        setBrokerLastPolledAt(Date.now());
       } catch {
         setServicesStatus(defaultServicesStatus);
+        setBrokerLastPolledAt(null);
       }
     };
 
@@ -338,18 +358,16 @@ export function Network() {
                 const iconColor = isOnline ? 'green.500' : 'red.500';
                 const statusLabel = isOnline ? 'Online' : 'Offline';
                 const statusColor = isOnline ? 'green.600' : 'red.600';
-                const {
-                  base,
-                  statusPath,
-                  responsePath: getResponsePath,
-                } = ENDPOINT_CONFIGS[row.endpoint];
+                const { base, statusPath } = ENDPOINT_CONFIGS[row.endpoint];
                 const { protocol, host } = parseEndpoint(base);
                 const responsePath =
                   row.endpoint === 'rts'
                     ? rtsData.timeNs !== null
                       ? timeAgo(rtsData.timeNs)
                       : null
-                    : getResponsePath(row.responseKey);
+                    : isOnline && brokerLastPolledAt !== null
+                      ? timeAgoFromMs(brokerLastPolledAt)
+                      : null;
 
                 return (
                   <Table.Row key={row.id}>
