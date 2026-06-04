@@ -1,15 +1,15 @@
-import { chakra } from '@chakra-ui/react';
 import { useCallback, useEffect, useRef } from 'react';
+import { chakra } from '@chakra-ui/react';
+import { useScheduleGantt } from './use-schedule';
 import { DataSet } from 'vis-data/esnext';
 import type { DataItem, DataGroup } from 'vis-timeline/esnext';
 import { Timeline } from 'vis-timeline/esnext';
 import 'vis-timeline/styles/vis-timeline-graph2d.min.css';
-import type { RTS } from '@rmf2-ui/data';
 import './vis-timeline-styles.css';
 
 const COLOR_CLASSES = ['green', 'magenta', 'yellow', 'orange'];
 const OPTIONS = { height: '680px', orientation: 'top', zoomFriction: 0 };
-const DEFAULT_ZOOM_LEVEL = 60 * 60; // Default to zoom 1hr
+const DEFAULT_ZOOM_LEVEL = 30 * 60; // Default to zoom 30min
 
 interface VisTimelineContext {
   dataGroups: DataSet<DataGroup>;
@@ -17,8 +17,8 @@ interface VisTimelineContext {
   timeline: Timeline;
 }
 
-export function ScheduleGantt(props: { tasks: RTS.Task[] }) {
-  const { tasks } = props;
+export function ScheduleGantt() {
+  const { tasks, openTaskViewDialog } = useScheduleGantt();
   const visTimelineContext = useRef<VisTimelineContext>(null);
 
   const containerRef = useCallback((node: HTMLDivElement) => {
@@ -27,6 +27,7 @@ export function ScheduleGantt(props: { tasks: RTS.Task[] }) {
     }
 
     if (node !== null) {
+      // GENERATE NEW TIMELINE
       const dataGroups: DataSet<DataGroup> = new DataSet();
       const dataItems: DataSet<DataItem> = new DataSet();
       node.innerHTML = '';
@@ -42,8 +43,8 @@ export function ScheduleGantt(props: { tasks: RTS.Task[] }) {
     }
   }, []);
 
+  // Update timeline on tasks changes
   useEffect(() => {
-    // GENERATE NEW TIMELINE
     if (!visTimelineContext.current) {
       return;
     }
@@ -54,10 +55,12 @@ export function ScheduleGantt(props: { tasks: RTS.Task[] }) {
     );
 
     const groupIds = new Set<string>();
+    const taskIds = new Set<string>();
     const taskTypes = new Set<string>();
     for (const task of filteredTasks) {
       taskTypes.add(task.type);
       groupIds.add(task.resourceId ?? 'unassigned');
+      taskIds.add(task.id);
     }
 
     // Prep color map
@@ -97,11 +100,27 @@ export function ScheduleGantt(props: { tasks: RTS.Task[] }) {
     visTimelineContext.current.dataGroups.update(newDataGroups);
     visTimelineContext.current.dataItems.update(newDataItems);
 
-    // Update window
-    visTimelineContext.current.timeline.setWindow(
-      new Date(Date.now() - (DEFAULT_ZOOM_LEVEL / 2) * 1000),
-      new Date(Date.now() + (DEFAULT_ZOOM_LEVEL / 2) * 1000),
-    );
+    // remove deleted data
+    const deletedDataItems = visTimelineContext.current.dataItems
+      .getIds()
+      .reduce((acc: (number | string)[], cur) => {
+        if (typeof cur === 'number') {
+          acc.push(cur);
+          return acc;
+        }
+        if (taskIds.has(cur)) {
+          return acc;
+        }
+        acc.push(cur);
+        return acc;
+      }, []);
+
+    visTimelineContext.current.dataItems.remove(deletedDataItems);
+    // // Update window
+    // visTimelineContext.current.timeline.setWindow(
+    //   new Date(Date.now() - (DEFAULT_ZOOM_LEVEL / 2) * 1000),
+    //   new Date(Date.now() + (DEFAULT_ZOOM_LEVEL / 2) * 1000),
+    // );
 
     // TODAY
     const todayButton = document.getElementById('todayId');
@@ -133,6 +152,19 @@ export function ScheduleGantt(props: { tasks: RTS.Task[] }) {
     // return () => timelineRef.current = null
   }, [tasks]);
 
+  useEffect(() => {
+    if (!visTimelineContext.current) {
+      return;
+    }
+
+    visTimelineContext.current.timeline.on('doubleClick', (properties) => {
+      // Open ScheduleViewTask when double click on a timeline item
+      if (properties.item !== null) {
+        openTaskViewDialog(properties.item);
+      }
+    });
+  }, [openTaskViewDialog]);
+
   return (
     <chakra.div
       ref={containerRef}
@@ -148,7 +180,7 @@ export function ScheduleGantt(props: { tasks: RTS.Task[] }) {
           _dark: 'colors.white',
         },
       }}
-    ></chakra.div>
+    />
   );
 }
 

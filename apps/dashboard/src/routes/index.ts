@@ -1,6 +1,6 @@
 import type { RouteObject } from 'react-router';
 import { HomeRedirect } from './home-redirect';
-import { NotFound } from './not-found';
+import { NotFoundRedirect } from './not-found-redirect';
 
 export const AdminRoutes: RouteObject[] = [
   {
@@ -75,7 +75,7 @@ export const dashboardRoutes: RouteObject[] = [
   },
   {
     path: '*',
-    Component: NotFound,
+    Component: NotFoundRedirect,
   },
 ];
 
