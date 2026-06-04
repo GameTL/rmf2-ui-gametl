@@ -1,12 +1,18 @@
 import { Icon } from '@chakra-ui/react';
-import { MdOutlineTask, MdHome, MdMap } from 'react-icons/md';
+import { MdDashboard, MdEventNote, MdHome, MdMap } from 'react-icons/md';
 import { FaNetworkWired } from 'react-icons/fa';
 import { SiUnrealengine } from 'react-icons/si';
-import { GrSystem, GrSchedules } from 'react-icons/gr';
+import { GrSchedules } from 'react-icons/gr';
 
 import type { RoutesType } from '@rmf2-ui/chakra';
 
-export const routes: RoutesType[] = [
+/** Dashboard sidebar/home metadata beyond shared {@link RoutesType}. */
+export type DashboardRoute = RoutesType & {
+  description?: string;
+  children?: DashboardRoute[];
+};
+
+export const routes: DashboardRoute[] = [
   {
     name: 'Home',
     path: '/home',
@@ -14,12 +20,13 @@ export const routes: RoutesType[] = [
   },
   {
     name: 'System',
-    path: '/system',
-    icon: <Icon as={GrSystem} width="20px" height="20px" color="inherit" />,
+    icon: <Icon as={MdDashboard} width="20px" height="20px" color="inherit" />,
     children: [
       {
         name: 'Network',
         path: '/system/network',
+        description:
+          'Start and check brokers, databases, Redis, and related middleware status.',
         icon: (
           <Icon
             as={FaNetworkWired}
@@ -40,26 +47,25 @@ export const routes: RoutesType[] = [
           />
         ),
         path: '/system/simulation',
+        description:
+          'Onboard devices and services, run UE5 simulation via the Python launcher API.',
       },
       {
         name: 'Map',
         path: '/system/map',
-        icon: (
-          <Icon as={MdMap} width="20px" height="30px" color="inherit" />
-        ),
+        icon: <Icon as={MdMap} width="20px" height="30px" color="inherit" />,
       },
     ],
   },
   {
     name: 'Operation',
-    path: '/operation',
-    icon: (
-      <Icon as={MdOutlineTask} width="20px" height="30px" color="inherit" />
-    ),
+    icon: <Icon as={MdEventNote} width="20px" height="20px" color="inherit" />,
     children: [
       {
         name: 'Schedule',
         path: '/operation/schedule',
+        description:
+          'Plan and review operation schedules with Gantt-style timelines.',
         icon: (
           <Icon as={GrSchedules} width="20px" height="30px" color="inherit" />
         ),

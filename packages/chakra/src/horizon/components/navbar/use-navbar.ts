@@ -2,6 +2,7 @@ import type { Location } from 'react-router';
 import { useLocation } from 'react-router';
 import { createContext, useContext } from 'react';
 import type { RoutesType } from '@/types';
+import { routeMatchesLocation } from '@/utils/routes.utils';
 
 interface RouteComponent {
   name: string;
@@ -15,23 +16,25 @@ const getCurrentRouteComponentsRecursive = (
   components: RouteComponent[],
 ): RouteComponent[] => {
   for (const route of routes) {
-    if (!currentLocation.pathname.startsWith(route.path.toLowerCase())) {
+    if (!routeMatchesLocation(route, currentLocation.pathname)) {
       continue;
     }
 
-    if (currentLocation.pathname === route.path.toLowerCase()) {
+    if (route.children?.length) {
       components.push({ name: route.name, path: '#' });
-      return components;
-    }
-
-    components.push(route);
-
-    if (route.children) {
       return getCurrentRouteComponentsRecursive(
         currentLocation,
         route.children,
         components,
       );
+    }
+
+    if (
+      route.path &&
+      currentLocation.pathname.toLowerCase() === route.path.toLowerCase()
+    ) {
+      components.push({ name: route.name, path: '#' });
+      return components;
     }
 
     return components;
