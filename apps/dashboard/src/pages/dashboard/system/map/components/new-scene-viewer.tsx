@@ -21,14 +21,21 @@ import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { clone as cloneSkeleton } from 'three/addons/utils/SkeletonUtils.js';
 import { ViewportGizmo } from 'three-viewport-gizmo';
 import { Tooltip } from '@/components/ui/tooltip';
-// import {
-//   ROBOT_TURN_SPEED_RAD,
-//   stepDifferentialDrive,
-//   type DriveState,
-// } from '../differential-drive.demo';
-import { type DriveState } from '../differential-drive.demo';
 
 import { DropPointMarker } from '../drop-point-marker';
+
+import {
+  type CameraFrame,
+  type RobotConfig,
+  type RobotCoordinateSystem,
+  type RobotWaypoint,
+  type RobotRuntime,
+  type RobotStatus,
+  type SceneViewerApi,
+  type SceneBounds,
+  type DropPointCoords,
+  type StaticCollisionBox,
+} from './robot-types';
 
 const SCENE_URL = '/RMF2_SIM/Test_3.glb';
 const ROBOT_MODEL_URL = '/robot.glb';
@@ -58,109 +65,6 @@ const END_VIEW_ANGLE = Math.PI / 4;
 const ROBOT_TRAIL_Z_OFFSET = 0.08;
 const ROBOT_TRAIL_SAMPLE_DISTANCE = 0.25;
 const DEFAULT_ROBOT_COLOR = '#00A3FF';
-
-type LoadState = 'loading' | 'ready' | 'error';
-
-type CameraFrame = {
-  center: THREE.Vector3;
-  maxDim: number;
-  sphereRadius: number;
-  startPosition: THREE.Vector3;
-  endPosition: THREE.Vector3;
-};
-
-type SceneBounds = {
-  min: THREE.Vector3;
-  max: THREE.Vector3;
-  maxDim: number;
-  floorZ: number;
-};
-
-type SceneDebugInfo = {
-  floorZ: number;
-  min: { x: number; y: number; z: number };
-  max: { x: number; y: number; z: number };
-};
-
-type DropPointCoords = { x: number; y: number; z: number };
-
-type RobotMotionStatus = 'idle' | 'moving' | 'blocked' | 'disabled' | 'arrived';
-
-type RobotCoordinateSystem = 'navigation' | 'world';
-
-type RobotWaypoint = DropPointCoords & {
-  id: string | number;
-  label?: string;
-};
-
-type RobotConfig = {
-  id: string;
-  name?: string;
-  position?: Partial<DropPointCoords>;
-  target?: Partial<DropPointCoords> | null;
-  path?: RobotWaypoint[];
-  startWaypointIndex?: number;
-  loop?: boolean;
-  speed?: number;
-  enabled?: boolean;
-  rotationZ?: number;
-  scale?: number | Partial<DropPointCoords>;
-  coordinateSystem?: RobotCoordinateSystem;
-  color?: string;
-};
-
-type RobotStatus = {
-  id: string;
-  name: string;
-  status: RobotMotionStatus;
-  position: DropPointCoords;
-  target?: DropPointCoords;
-  waypointId?: string | number;
-  waypointLabel?: string;
-  waypointIndex?: number;
-  waypointCount?: number;
-  blockedBy?: string;
-};
-
-type RobotTrailRuntime = {
-  group: THREE.Group;
-  plannedLine: THREE.Line;
-  activeLine: THREE.Line;
-  plannedMaterial: THREE.LineBasicMaterial;
-  activeMaterial: THREE.LineBasicMaterial;
-  plannedGeometry: THREE.BufferGeometry;
-  activeGeometry: THREE.BufferGeometry;
-  visitedPoints: THREE.Vector3[];
-  lastSampledPoint: THREE.Vector3;
-};
-
-type RobotRuntime = {
-  id: string;
-  name: string;
-  root: THREE.Group;
-  config: RobotConfig;
-  pathIndex: number;
-  lastConfigPositionKey: string;
-  lastConfigPathKey: string;
-  driveState: DriveState | null;
-  blockedBy?: string;
-  status: RobotMotionStatus;
-  lastConfigTrailKey: string;
-  trail?: RobotTrailRuntime;
-};
-
-type StaticCollisionBox = {
-  box: THREE.Box3;
-  name: string;
-};
-
-type SceneViewerApi = {
-  setShowGridAxes: (show: boolean) => void;
-  setDropPointEnabled: (enabled: boolean) => void;
-  setDropPointPosition: (position: DropPointCoords) => void;
-  setRoofSliceEnabled: (enabled: boolean) => void;
-  setRoofSliceHeight: (height: number) => void;
-};
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
@@ -1161,6 +1065,7 @@ export function SceneViewer() {
             floorZ,
             existing.root.position,
           );
+
           scene.add(existing.trail.group);
           existing.lastConfigTrailKey = nextTrailKey;
         }
@@ -1249,28 +1154,6 @@ export function SceneViewer() {
         const previousPosition = robot.root.position.clone();
         const previousHeading =
           robot.root.rotation.z + ROBOT_MODEL_HEADING_OFFSET;
-        // const spawnHeading = robot.config.rotationZ ?? previousHeading;
-
-        // const stepResult = stepDifferentialDrive({
-        //   position: { x: previousPosition.x, y: previousPosition.y },
-        //   z: target.z,
-        //   target: { x: target.x, y: target.y },
-        //   state: robot.driveState,
-        //   initialHeading: spawnHeading,
-        //   speed: Math.max(robot.config.speed ?? 1, 0),
-        //   turnSpeed: ROBOT_TURN_SPEED_RAD,
-        //   arrivalEpsilon: ROBOT_ARRIVAL_EPSILON,
-        //   deltaSeconds,
-        // });
-
-        // robot.root.position.set(
-        //   stepResult.position.x,
-        //   stepResult.position.y,
-        //   stepResult.z,
-        // );
-        // robot.root.rotation.z = stepResult.heading;
-        // robot.driveState = stepResult.state;
-
         const stepResult = stepDirectlyTowardWaypoint({
           current: previousPosition,
           target,
