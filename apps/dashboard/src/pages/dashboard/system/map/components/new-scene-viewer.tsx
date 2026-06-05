@@ -4,13 +4,10 @@ import {
   Button,
   Card,
   Center,
-  Field,
   HStack,
   IconButton,
-  Input,
   Kbd,
   Stack,
-  Switch,
   Text,
 } from '@chakra-ui/react';
 import { LuLocateFixed } from 'react-icons/lu';
@@ -18,830 +15,101 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { DRACOLoader } from 'three/addons/loaders/DRACOLoader.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
-import { clone as cloneSkeleton } from 'three/addons/utils/SkeletonUtils.js';
 import { ViewportGizmo } from 'three-viewport-gizmo';
-import { Tooltip } from '@/components/ui/tooltip';
 
+import { Tooltip } from '@/components/ui/tooltip';
 import { DropPointMarker } from '../drop-point-marker';
 
-import {
-  type CameraFrame,
-  type RobotConfig,
-  type RobotCoordinateSystem,
-  type RobotWaypoint,
-  type RobotRuntime,
-  type RobotStatus,
-  type SceneViewerApi,
-  type SceneBounds,
-  type DropPointCoords,
-  type StaticCollisionBox,
-  type RobotTrailRuntime,
-  type SceneDebugInfo,
-  type LoadState,
+import type {
+  DropPointCoords,
+  LoadState,
+  RobotRuntime,
+  RobotStatus,
+  SceneDebugInfo,
+  SceneViewerApi,
+  StaticCollisionBox,
 } from './robot-types';
 
-const SCENE_URL = '/RMF2_SIM/Test_3.glb';
-const ROBOT_MODEL_URL = '/robot.glb';
-// const ROBOTS_CONFIG_URL = '/robots.json';
-// replaced with API route
-const API_BASE_URL =
-  import.meta.env.VITE_API_BASE_URL || 'http://localhost:8008';
-const ROBOTS_CONFIG_URL = `${API_BASE_URL}/api/robots`;
-
-const ROBOT_CONFIG_REFRESH_MS = 1000;
-const ROBOT_COLLISION_PADDING = 0.05;
-const ROBOT_ARRIVAL_EPSILON = 0.05;
-const STATIC_COLLISION_IGNORE_NAMES = new Set(['Box128', 'Box127']);
-const ROBOT_MODEL_HEADING_OFFSET = -Math.PI / 2; // model faces +X, but we want it to face +Y
-
-// const SCENE_URL = '/scene.draco.glb';
-const DRACO_DECODER_PATH =
-  'https://www.gstatic.com/draco/versioned/decoders/1.5.6/';
-const INTRO_DURATION_MS = 500;
-const INTRO_START_DISTANCE_FACTOR = 1.5;
-const END_DISTANCE_FACTOR = 0.75;
-
-// Scene is Z-up (robotics convention): +Z is vertical, floor lies in the XY plane.
-// END_VIEW_ANGLE is measured from +Z (vertical) toward -Y (the camera's horizontal
-// offset), so 45° gives an isometric-style angled look from above.
-const END_VIEW_ANGLE = Math.PI / 4;
-const ROBOT_TRAIL_Z_OFFSET = 0.08;
-const ROBOT_TRAIL_SAMPLE_DISTANCE = 0.25;
-const DEFAULT_ROBOT_COLOR = '#00A3FF';
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null;
-}
-
-function readNumber(value: unknown, fallback: number) {
-  return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
-}
-
-function readCoords(
-  value: unknown,
-  fallback: DropPointCoords,
-): DropPointCoords {
-  if (!isRecord(value)) return fallback;
-
-  return {
-    x: readNumber(value.x, fallback.x),
-    y: readNumber(value.y, fallback.y),
-    z: readNumber(value.z, fallback.z),
-  };
-}
-
-function coordKey(position: Partial<DropPointCoords> | undefined) {
-  if (!position) return '';
-  return `${position.x ?? ''}:${position.y ?? ''}:${position.z ?? ''}`;
-}
-
-function normalizeRobotPath(value: unknown): RobotWaypoint[] | undefined {
-  if (!Array.isArray(value)) return undefined;
-
-  return value.filter(isRecord).map((waypoint, index) => ({
-    id:
-      typeof waypoint.id === 'string' || typeof waypoint.id === 'number'
-        ? waypoint.id
-        : index,
-    label: typeof waypoint.label === 'string' ? waypoint.label : undefined,
-    x: readNumber(waypoint.x, 0),
-    y: readNumber(waypoint.y, 0),
-    z: readNumber(waypoint.z, 0),
-  }));
-}
-
-function pathKey(path: RobotWaypoint[] | undefined) {
-  if (!path?.length) return '';
-
-  return path
-    .map(
-      (waypoint) =>
-        `${waypoint.id}:${waypoint.label ?? ''}:${waypoint.x}:${waypoint.y}:${waypoint.z}`,
-    )
-    .join('|');
-}
-
-function normalizeCoordinateSystem(value: unknown): RobotCoordinateSystem {
-  return value === 'world' ? 'world' : 'navigation';
-}
-
-function configCoordsToWorld(
-  value: unknown,
-  fallbackWorld: DropPointCoords,
-  coordinateSystem: RobotCoordinateSystem,
-): DropPointCoords {
-  if (!isRecord(value)) return fallbackWorld;
-
-  if (coordinateSystem === 'world') {
-    return readCoords(value, fallbackWorld);
-  }
-
-  // navigation-path.json uses the same coordinates as the original GLB path.
-  // The viewer rotates GLB content by +90° around X, so convert:
-  // source (x, y, z) -> viewer/world (x, -z, y).
-  const sourceX = readNumber(value.x, fallbackWorld.x);
-  const sourceY = readNumber(value.y, fallbackWorld.z);
-  const sourceZ = readNumber(value.z, -fallbackWorld.y);
-
-  return {
-    x: sourceX,
-    y: -sourceZ,
-    z: sourceY,
-  };
-}
-
-function clampWaypointIndex(index: number, waypointCount: number) {
-  if (waypointCount <= 0) return 0;
-  return Math.min(Math.max(Math.floor(index), 0), waypointCount - 1);
-}
-
-function getConfiguredStartWaypointIndex(config: RobotConfig) {
-  const waypointCount = config.path?.length ?? 0;
-  return clampWaypointIndex(
-    readNumber(config.startWaypointIndex, 0),
-    waypointCount,
-  );
-}
-
-function getInitialPathIndex(config: RobotConfig) {
-  const waypointCount = config.path?.length ?? 0;
-  if (waypointCount <= 0) return 0;
-
-  const startWaypointIndex = getConfiguredStartWaypointIndex(config);
-
-  // If a custom position is supplied, treat startWaypointIndex as the first
-  // target. If position is omitted, spawn at startWaypointIndex and target the
-  // next waypoint.
-  if (config.position) return startWaypointIndex;
-  if (startWaypointIndex < waypointCount - 1) return startWaypointIndex + 1;
-  return config.loop ? 0 : startWaypointIndex;
-}
-
-function getInitialRobotPosition(config: RobotConfig, floorZ: number) {
-  const coordinateSystem = config.coordinateSystem ?? 'navigation';
-  const defaultWorldPosition = { x: 0, y: 0, z: floorZ };
-
-  if (config.position) {
-    return configCoordsToWorld(
-      config.position,
-      defaultWorldPosition,
-      coordinateSystem,
-    );
-  }
-
-  const startWaypoint = config.path?.[getConfiguredStartWaypointIndex(config)];
-  if (startWaypoint) {
-    return configCoordsToWorld(
-      startWaypoint,
-      defaultWorldPosition,
-      coordinateSystem,
-    );
-  }
-
-  return defaultWorldPosition;
-}
-
-function getActiveRobotWaypoint(robot: RobotRuntime) {
-  const path = robot.config.path;
-  if (!path?.length) return undefined;
-
-  const waypointIndex = clampWaypointIndex(robot.pathIndex, path.length);
-  return {
-    waypoint: path[waypointIndex],
-    waypointIndex,
-    waypointCount: path.length,
-  };
-}
-
-function getActiveRobotTarget(
-  robot: RobotRuntime,
-  floorZ: number,
-):
-  | {
-      target: DropPointCoords;
-      waypoint?: RobotWaypoint;
-      waypointIndex?: number;
-      waypointCount?: number;
-    }
-  | undefined {
-  const coordinateSystem = robot.config.coordinateSystem ?? 'navigation';
-  const fallback = {
-    x: robot.root.position.x,
-    y: robot.root.position.y,
-    z: floorZ,
-  };
-
-  const activeWaypoint = getActiveRobotWaypoint(robot);
-  if (activeWaypoint) {
-    return {
-      target: configCoordsToWorld(
-        activeWaypoint.waypoint,
-        fallback,
-        coordinateSystem,
-      ),
-      ...activeWaypoint,
-    };
-  }
-
-  if (robot.config.target) {
-    return {
-      target: configCoordsToWorld(
-        robot.config.target,
-        fallback,
-        coordinateSystem,
-      ),
-    };
-  }
-
-  return undefined;
-}
-
-function normalizeRobotConfigs(payload: unknown): RobotConfig[] {
-  const sharedPath = isRecord(payload)
-    ? normalizeRobotPath(payload.path)
-    : undefined;
-  const sharedCoordinateSystem = isRecord(payload)
-    ? normalizeCoordinateSystem(payload.coordinateSystem)
-    : 'navigation';
-
-  const rawRobots = Array.isArray(payload)
-    ? payload
-    : isRecord(payload) && Array.isArray(payload.robots)
-      ? payload.robots
-      : [];
-
-  return rawRobots.filter(isRecord).map((robot, index) => {
-    const robotPath = normalizeRobotPath(robot.path) ?? sharedPath;
-    const coordinateSystem = normalizeCoordinateSystem(
-      robot.coordinateSystem ?? sharedCoordinateSystem,
-    );
-
-    return {
-      id:
-        typeof robot.id === 'string' && robot.id.trim()
-          ? robot.id
-          : `robot-${index + 1}`,
-      name: typeof robot.name === 'string' ? robot.name : undefined,
-      color: typeof robot.color === 'string' ? robot.color : undefined,
-      position: isRecord(robot.position) ? robot.position : undefined,
-      target:
-        isRecord(robot.target) || robot.target === null
-          ? robot.target
-          : undefined,
-      path: robotPath,
-      startWaypointIndex: readNumber(robot.startWaypointIndex, 0),
-      loop: robot.loop === true,
-      speed: readNumber(robot.speed, 1),
-      enabled: robot.enabled !== false,
-      rotationZ:
-        typeof robot.rotationZ === 'number' && Number.isFinite(robot.rotationZ)
-          ? robot.rotationZ
-          : undefined,
-      scale:
-        typeof robot.scale === 'number' || isRecord(robot.scale)
-          ? robot.scale
-          : 1,
-      coordinateSystem,
-    };
-  });
-}
-
-async function fetchRobotConfigs(): Promise<RobotConfig[]> {
-  const response = await fetch(`${ROBOTS_CONFIG_URL}?t=${Date.now()}`, {
-    cache: 'no-store',
-  });
-
-  if (!response.ok) {
-    throw new Error(`Failed to load ${ROBOTS_CONFIG_URL}`);
-  }
-
-  return normalizeRobotConfigs(await response.json());
-}
-
-function loadGltfAsync(loader: GLTFLoader, url: string) {
-  return new Promise<THREE.Group>((resolve, reject) => {
-    loader.load(
-      url,
-      (gltf) => resolve(gltf.scene),
-      undefined,
-      (error) => reject(error),
-    );
-  });
-}
-
-function cloneRobotTemplate(template: THREE.Group) {
-  const cloned = cloneSkeleton(template) as THREE.Group;
-
-  cloned.traverse((child) => {
-    if (!(child instanceof THREE.Mesh)) return;
-
-    child.geometry = child.geometry.clone();
-    child.material = Array.isArray(child.material)
-      ? child.material.map((material) => material.clone())
-      : child.material.clone();
-  });
-
-  return cloned;
-}
-
-function applyRobotScale(root: THREE.Group, scale: RobotConfig['scale']) {
-  if (typeof scale === 'number') {
-    root.scale.setScalar(scale);
-    return;
-  }
-
-  if (isRecord(scale)) {
-    root.scale.set(
-      readNumber(scale.x, 1),
-      readNumber(scale.y, 1),
-      readNumber(scale.z, 1),
-    );
-  }
-}
-
-function collectStaticCollisionBoxes(
-  root: THREE.Object3D,
-  floorZ: number,
-): StaticCollisionBox[] {
-  const boxes: StaticCollisionBox[] = [];
-
-  root.updateWorldMatrix(true, true);
-  root.traverse((child) => {
-    if (!(child instanceof THREE.Mesh)) return;
-
-    const objectNames = [child.name, child.parent?.name].filter(Boolean);
-
-    if (objectNames.some((name) => STATIC_COLLISION_IGNORE_NAMES.has(name!))) {
-      return;
-    }
-
-    const box = new THREE.Box3().setFromObject(child);
-    const size = box.getSize(new THREE.Vector3());
-
-    if (
-      !Number.isFinite(size.x) ||
-      !Number.isFinite(size.y) ||
-      !Number.isFinite(size.z)
-    ) {
-      return;
-    }
-
-    // Skip flat floor plates, decals, and tiny mesh fragments. Otherwise every
-    // robot would constantly collide with the ground it is standing on.
-    if (size.x < 0.01 || size.y < 0.01 || size.z < 0.01) return;
-    const height = size.z;
-    const isVeryFlat = height < 0.25;
-    const isNearFloor = box.min.z <= floorZ + 0.2;
-    const isLargeFloorLikeSurface =
-      isVeryFlat && isNearFloor && size.x > 2 && size.y > 2;
-
-    if (box.max.z <= floorZ + 0.15) return;
-    if (isLargeFloorLikeSurface) return;
-
-    boxes.push({
-      box: box.expandByScalar(ROBOT_COLLISION_PADDING),
-      name: child.name || child.parent?.name || 'scene obstacle',
-    });
-  });
-
-  return boxes;
-}
-
-function getObjectBox(root: THREE.Object3D) {
-  root.updateWorldMatrix(true, true);
-  return new THREE.Box3()
-    .setFromObject(root)
-    .expandByScalar(ROBOT_COLLISION_PADDING);
-}
-
-function toRobotStatus(robot: RobotRuntime, floorZ: number): RobotStatus {
-  const activeTarget = getActiveRobotTarget(robot, floorZ);
-
-  return {
-    id: robot.id,
-    name: robot.name,
-    status: robot.config.enabled === false ? 'disabled' : robot.status,
-    position: {
-      x: robot.root.position.x,
-      y: robot.root.position.y,
-      z: robot.root.position.z,
-    },
-    target: activeTarget?.target,
-    waypointId: activeTarget?.waypoint?.id,
-    waypointLabel: activeTarget?.waypoint?.label,
-    waypointIndex: activeTarget?.waypointIndex,
-    waypointCount: activeTarget?.waypointCount,
-    blockedBy: robot.blockedBy,
-  };
-}
-
-function robotTrailKey(config: RobotConfig) {
-  return [
-    config.color ?? DEFAULT_ROBOT_COLOR,
-    config.coordinateSystem ?? 'navigation',
-    pathKey(config.path),
-  ].join('::');
-}
-
-function getRobotColor(config: RobotConfig) {
-  try {
-    return new THREE.Color(config.color ?? DEFAULT_ROBOT_COLOR);
-  } catch {
-    return new THREE.Color(DEFAULT_ROBOT_COLOR);
-  }
-}
-
-function withTrailOffset(point: THREE.Vector3) {
-  return point.clone().add(new THREE.Vector3(0, 0, ROBOT_TRAIL_Z_OFFSET));
-}
-
-function getRobotPathWorldPoints(
-  config: RobotConfig,
-  floorZ: number,
-): THREE.Vector3[] {
-  const coordinateSystem = config.coordinateSystem ?? 'navigation';
-
-  return (config.path ?? []).map((waypoint) => {
-    const world = configCoordsToWorld(
-      waypoint,
-      { x: 0, y: 0, z: floorZ },
-      coordinateSystem,
-    );
-
-    return new THREE.Vector3(world.x, world.y, world.z + ROBOT_TRAIL_Z_OFFSET);
-  });
-}
-
-function createLineGeometryFromPoints(points: THREE.Vector3[]) {
-  const geometry = new THREE.BufferGeometry();
-
-  if (points.length === 0) {
-    geometry.setFromPoints([]);
-  } else if (points.length === 1) {
-    geometry.setFromPoints([points[0], points[0]]);
-  } else {
-    geometry.setFromPoints(points);
-  }
-
-  return geometry;
-}
-
-function createRobotTrail(
-  config: RobotConfig,
-  floorZ: number,
-  startPosition: THREE.Vector3,
-): RobotTrailRuntime {
-  const color = getRobotColor(config);
-  const group = new THREE.Group();
-  group.name = `trail:${config.id}`;
-
-  const plannedPoints = getRobotPathWorldPoints(config, floorZ);
-
-  const plannedGeometry = createLineGeometryFromPoints(plannedPoints);
-  const activeGeometry = createLineGeometryFromPoints([
-    withTrailOffset(startPosition),
-    withTrailOffset(startPosition),
-  ]);
-
-  const plannedMaterial = new THREE.LineBasicMaterial({
-    color,
-    transparent: true,
-    opacity: 0.25,
-    depthWrite: false,
-    depthTest: false,
-  });
-
-  const activeMaterial = new THREE.LineBasicMaterial({
-    color,
-    transparent: true,
-    opacity: 1,
-    depthWrite: false,
-    depthTest: false,
-  });
-
-  const plannedLine = new THREE.Line(plannedGeometry, plannedMaterial);
-  const activeLine = new THREE.Line(activeGeometry, activeMaterial);
-
-  plannedLine.name = `planned-path:${config.id}`;
-  activeLine.name = `active-trail:${config.id}`;
-
-  plannedLine.renderOrder = 20;
-  activeLine.renderOrder = 30;
-
-  group.add(plannedLine);
-  group.add(activeLine);
-
-  const startPoint = withTrailOffset(startPosition);
-
-  return {
-    group,
-    plannedLine,
-    activeLine,
-    plannedMaterial,
-    activeMaterial,
-    plannedGeometry,
-    activeGeometry,
-    visitedPoints: [startPoint.clone()],
-    lastSampledPoint: startPoint.clone(),
-  };
-}
-
-function disposeRobotTrail(trail: RobotTrailRuntime) {
-  trail.plannedGeometry.dispose();
-  trail.activeGeometry.dispose();
-  trail.plannedMaterial.dispose();
-  trail.activeMaterial.dispose();
-}
-
-function resetRobotTrail(robot: RobotRuntime) {
-  if (!robot.trail) return;
-
-  const startPoint = withTrailOffset(robot.root.position);
-
-  robot.trail.visitedPoints = [startPoint.clone()];
-  robot.trail.lastSampledPoint.copy(startPoint);
-  robot.trail.activeGeometry.setFromPoints([startPoint, startPoint]);
-  robot.trail.activeGeometry.computeBoundingSphere();
-}
-
-function updateRobotTrail(robot: RobotRuntime, force = false) {
-  if (!robot.trail) return;
-
-  const currentPoint = withTrailOffset(robot.root.position);
-  const distance = currentPoint.distanceTo(robot.trail.lastSampledPoint);
-
-  if (!force && distance < ROBOT_TRAIL_SAMPLE_DISTANCE) return;
-
-  robot.trail.visitedPoints.push(currentPoint.clone());
-  robot.trail.lastSampledPoint.copy(currentPoint);
-
-  robot.trail.activeGeometry.setFromPoints(robot.trail.visitedPoints);
-  robot.trail.activeGeometry.computeBoundingSphere();
-}
-
-function easeInOutCubic(t: number) {
-  return t < 0.5 ? 4 * t * t * t : 1 - (-2 * t + 2) ** 3 / 2;
-}
-
-function stepDirectlyTowardWaypoint({
-  current,
-  target,
-  speed,
-  deltaSeconds,
-  arrivalEpsilon,
-  previousHeading,
-}: {
-  current: THREE.Vector3;
-  target: DropPointCoords;
-  speed: number;
-  deltaSeconds: number;
-  arrivalEpsilon: number;
-  previousHeading: number;
-}) {
-  const targetPosition = new THREE.Vector3(target.x, target.y, target.z);
-  const toTarget = targetPosition.clone().sub(current);
-  const distance = toTarget.length();
-
-  const dx = target.x - current.x;
-  const dy = target.y - current.y;
-  const heading =
-    Math.abs(dx) > 0.000001 || Math.abs(dy) > 0.000001
-      ? Math.atan2(dy, dx)
-      : previousHeading;
-
-  if (distance <= arrivalEpsilon) {
-    return {
-      position: targetPosition,
-      heading,
-      arrived: true,
-    };
-  }
-
-  if (speed <= 0 || deltaSeconds <= 0) {
-    return {
-      position: current.clone(),
-      heading: previousHeading,
-      arrived: false,
-    };
-  }
-
-  const travelDistance = Math.min(speed * deltaSeconds, distance);
-  const direction = toTarget.normalize();
-  const nextPosition = current
-    .clone()
-    .add(direction.multiplyScalar(travelDistance));
-
-  return {
-    position: nextPosition,
-    heading,
-    arrived: nextPosition.distanceTo(targetPosition) <= arrivalEpsilon,
-  };
-}
-
-function tuneMaterials(root: THREE.Object3D) {
-  root.traverse((child) => {
-    if (!(child instanceof THREE.Mesh)) return;
-
-    const materials = Array.isArray(child.material)
-      ? child.material
-      : [child.material];
-
-    for (const material of materials) {
-      // Coplanar faces in architectural exports often z-fight at grazing angles.
-      material.polygonOffset = true;
-      material.polygonOffsetFactor = 1;
-      material.polygonOffsetUnits = 1;
-
-      if (material.transparent || material.opacity < 1) {
-        material.depthWrite = false;
-        material.side = THREE.FrontSide;
-        child.renderOrder = 1;
-      } else if (material.side === THREE.DoubleSide) {
-        // Back faces fighting with front faces on thin geometry.
-        material.side = THREE.FrontSide;
-      }
-    }
-  });
-}
-
-function computeSceneBounds(root: THREE.Object3D): SceneBounds {
-  const box = new THREE.Box3().setFromObject(root);
-  const min = box.min.clone();
-  const max = box.max.clone();
-  const size = box.getSize(new THREE.Vector3());
-
-  return {
-    min,
-    max,
-    maxDim: Math.max(size.x, size.y, size.z),
-    floorZ: min.z,
-  };
-}
-
-function toSceneDebugInfo(bounds: SceneBounds): SceneDebugInfo {
-  return {
-    floorZ: bounds.floorZ,
-    min: { x: bounds.min.x, y: bounds.min.y, z: bounds.min.z },
-    max: { x: bounds.max.x, y: bounds.max.y, z: bounds.max.z },
-  };
-}
+import {
+  DRACO_DECODER_PATH,
+  ROBOT_ARRIVAL_EPSILON,
+  ROBOT_CONFIG_REFRESH_MS,
+  ROBOT_MODEL_URL,
+  SCENE_URL,
+} from './constants';
+
+import { fetchRobotConfigs } from './robot-map-config/robot-config-api';
+
+// import { getInitialRobotPosition } from './robot-map-coordinates/robot-position';
+import { getActiveRobotTarget } from './robot-map-coordinates/waypoint-utils';
+
+import { stepDirectlyTowardWaypoint } from './robot-map-motion/direct-waypoint-motion';
+import {
+  movementHeadingToModelHeading,
+  modelHeadingToMovementHeading,
+} from './robot-map-motion/robot-heading';
+
+import { toRobotStatus } from './robot-map-runtime/robot-status';
+import { tuneMaterials } from './robot-map-runtime/robot-runtime-utils';
+
+import {
+  removeRobot,
+  syncRobotsFromConfig,
+} from './robot-map-runtime/robot-sync';
+
+import { updateRobotTrail } from './robot-map-draw-trail/robot-trail';
+
+import { loadGltfAsync } from './robot-map-scene/gltf-loader';
+import {
+  computeSceneBounds,
+  toSceneDebugInfo,
+} from './robot-map-scene/scene-bounds';
+import {
+  animateIntroCamera,
+  computeCameraFrame,
+  frameCamera,
+} from './robot-map-scene/scene-camera';
+import {
+  collectStaticCollisionBoxes,
+  findRobotCollision,
+} from './robot-map-scene/scene-collision';
+import { disposeObject3D } from './robot-map-scene/scene-dispose';
+import { createGridAxesHelpers } from './robot-map-scene/scene-grid-axis';
+
+import { SceneControlPanel } from './ui/scene-control-panel';
+import { DropPointPanel } from './ui/drop-point-panel';
+import { RobotStatusPanel } from './ui/robot-status-panel';
 
 function formatCoord(value: number) {
   return value.toFixed(3);
 }
 
-function createGridAxesHelpers(bounds: SceneBounds) {
-  const size = bounds.max.clone().sub(bounds.min);
-  // Z-up: floor is the XY plane, so the grid extent should span X and Y.
-  const gridExtent = Math.max(size.x, size.y) * 1.25;
-  const divisions = Math.max(10, Math.round(gridExtent / 2));
-
-  const grid = new THREE.GridHelper(gridExtent, divisions, 0x888888, 0xcccccc);
-  // GridHelper is authored in the XZ plane; rotate it into XY for a Z-up scene.
-  grid.rotation.x = Math.PI / 2;
-  const axes = new THREE.AxesHelper(bounds.maxDim * 0.35);
-
-  const group = new THREE.Group();
-  group.add(grid, axes);
-  group.position.set(
-    (bounds.min.x + bounds.max.x) / 2,
-    (bounds.min.y + bounds.max.y) / 2,
-    bounds.floorZ,
-  );
-  group.visible = false;
-
-  return group;
-}
-
-function disposeObject3D(root: THREE.Object3D) {
-  root.traverse((child) => {
-    if (child instanceof THREE.Mesh) {
-      child.geometry.dispose();
-      const materials = Array.isArray(child.material)
-        ? child.material
-        : [child.material];
-      materials.forEach((material) => material.dispose());
-    } else if (
-      child instanceof THREE.LineSegments ||
-      child instanceof THREE.Line
-    ) {
-      child.geometry.dispose();
-      const materials = Array.isArray(child.material)
-        ? child.material
-        : [child.material];
-      materials.forEach((material) => material.dispose());
-    }
-  });
-}
-
-function computeCameraFrame(root: THREE.Object3D): CameraFrame {
-  const box = new THREE.Box3().setFromObject(root);
-  const center = box.getCenter(new THREE.Vector3());
-  const size = box.getSize(new THREE.Vector3());
-  const maxDim = Math.max(size.x, size.y, size.z);
-  const sphere = box.getBoundingSphere(new THREE.Sphere());
-
-  const startDistance = maxDim * INTRO_START_DISTANCE_FACTOR;
-  const endDistance = maxDim * END_DISTANCE_FACTOR;
-
-  // Z-up: intro starts straight overhead (high +Z) and ends at an angled view
-  // offset along -Y so that +Y projects "up" on screen.
-  return {
-    center,
-    maxDim,
-    sphereRadius: sphere.radius,
-    startPosition: new THREE.Vector3(
-      center.x,
-      center.y,
-      center.z + startDistance,
-    ),
-    endPosition: new THREE.Vector3(
-      center.x,
-      center.y - endDistance * Math.sin(END_VIEW_ANGLE),
-      center.z + endDistance * Math.cos(END_VIEW_ANGLE),
-    ),
-  };
-}
-
-function applyCameraFrame(
-  camera: THREE.PerspectiveCamera,
-  controls: OrbitControls,
-  frame: CameraFrame,
-  position: THREE.Vector3,
-) {
-  // Tight near/far improves depth precision and reduces z-fighting.
-  camera.near = Math.max(frame.sphereRadius / 500, 0.05);
-  camera.far = frame.sphereRadius * 20;
-  camera.updateProjectionMatrix();
-
-  controls.target.copy(frame.center);
-  controls.minDistance = frame.maxDim * 0.15;
-  controls.maxDistance = frame.maxDim * 4;
-  camera.position.copy(position);
-  camera.lookAt(frame.center);
-  controls.update();
-}
-
-function frameCamera(
-  camera: THREE.PerspectiveCamera,
-  controls: OrbitControls,
-  root: THREE.Object3D,
-) {
-  const frame = computeCameraFrame(root);
-  applyCameraFrame(camera, controls, frame, frame.endPosition);
-}
-
-function animateIntroCamera(
-  camera: THREE.PerspectiveCamera,
-  controls: OrbitControls,
-  frame: CameraFrame,
-  isDisposed: () => boolean,
-) {
-  applyCameraFrame(camera, controls, frame, frame.startPosition);
-
-  const startTime = performance.now();
-  const from = frame.startPosition.clone();
-
-  const tick = (now: number) => {
-    if (isDisposed()) return;
-
-    const t = Math.min((now - startTime) / INTRO_DURATION_MS, 1);
-    const eased = easeInOutCubic(t);
-
-    camera.position.lerpVectors(from, frame.endPosition, eased);
-    camera.lookAt(frame.center);
-    controls.update();
-
-    if (t < 1) {
-      requestAnimationFrame(tick);
-    } else {
-      applyCameraFrame(camera, controls, frame, frame.endPosition);
-    }
-  };
-
-  requestAnimationFrame(tick);
-}
-
 export function SceneViewer() {
   const containerRef = useRef<HTMLDivElement>(null);
+
   const resetOrbitRef = useRef<(() => void) | null>(null);
   const resetRobotsRef = useRef<(() => void) | null>(null);
   const sceneApiRef = useRef<SceneViewerApi | null>(null);
+
   const [loadState, setLoadState] = useState<LoadState>('loading');
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+
   const [showGridAxes, setShowGridAxes] = useState(false);
   const [showDropPoint, setShowDropPoint] = useState(false);
+  const [showRoofSlice, setShowRoofSlice] = useState(true);
+  const [roofSliceHeight, setRoofSliceHeight] = useState(3.4);
+
   const [dropPoint, setDropPoint] = useState<DropPointCoords>({
     x: 0,
     y: 0,
     z: 0,
   });
+
   const [sceneDebug, setSceneDebug] = useState<SceneDebugInfo | null>(null);
   const [robotStatuses, setRobotStatuses] = useState<RobotStatus[]>([]);
+
   const showDropPointRef = useRef(showDropPoint);
   const dropPointRef = useRef(dropPoint);
-  const [showRoofSlice, setShowRoofSlice] = useState(true);
-  const [roofSliceHeight, setRoofSliceHeight] = useState(3.4);
 
   showDropPointRef.current = showDropPoint;
   dropPointRef.current = dropPoint;
@@ -872,10 +140,12 @@ export function SceneViewer() {
 
     const scene = new THREE.Scene();
     scene.background = new THREE.Color(0xffffff);
+
     const camera = new THREE.PerspectiveCamera(45, 1, 0.1, 1000);
-    // Z-up scene: orbit controls, gizmo, and projection all treat +Z as vertical.
+
     const previousDefaultUp = THREE.Object3D.DEFAULT_UP.clone();
     THREE.Object3D.DEFAULT_UP.set(0, 0, 1);
+
     camera.up.set(0, 0, 1);
     camera.position.set(5, -5, 5);
 
@@ -890,9 +160,10 @@ export function SceneViewer() {
       roofSliceHeight,
     );
 
-    renderer.clippingPlanes = [];
+    renderer.clippingPlanes = showRoofSlice ? [roofClipPlane] : [];
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     renderer.outputColorSpace = THREE.SRGBColorSpace;
+
     container.appendChild(renderer.domElement);
 
     const clock = new THREE.Clock();
@@ -906,12 +177,13 @@ export function SceneViewer() {
 
     const controls = new OrbitControls(camera, renderer.domElement);
     controls.enableDamping = false;
+    controls.zoomSpeed = 2.5;
 
     const gizmo = new ViewportGizmo(camera, renderer, {
       container: renderer.domElement.parentElement ?? container,
     });
+
     gizmo.attachControls(controls);
-    controls.zoomSpeed = 2.5;
 
     const dracoLoader = new DRACOLoader();
     dracoLoader.setDecoderPath(DRACO_DECODER_PATH);
@@ -921,220 +193,54 @@ export function SceneViewer() {
 
     let animationFrameId = 0;
     let disposed = false;
+
     let loadedScene: THREE.Group | null = null;
     let gridAxesHelpers: THREE.Group | null = null;
     let dropPointMarker: DropPointMarker | null = null;
-    const pickRaycaster = new THREE.Raycaster();
-    const pickPointer = new THREE.Vector2();
-    const robots = new Map<string, RobotRuntime>();
     let robotTemplate: THREE.Group | null = null;
-    let staticCollisionBoxes: StaticCollisionBox[] = [];
+
     let robotConfigTimerId: number | null = null;
+    let staticCollisionBoxes: StaticCollisionBox[] = [];
     let lastRobotStatusPublish = 0;
     let currentFloorZ = 0;
 
-    const findRobotCollision = (robot: RobotRuntime) => {
-      const robotBox = getObjectBox(robot.root);
+    const robots = new Map<string, RobotRuntime>();
 
-      for (const obstacle of staticCollisionBoxes) {
-        if (robotBox.intersectsBox(obstacle.box)) {
-          return obstacle.name;
-        }
-      }
-
-      for (const otherRobot of robots.values()) {
-        if (otherRobot.id === robot.id) continue;
-        if (robotBox.intersectsBox(getObjectBox(otherRobot.root))) {
-          return otherRobot.name;
-        }
-      }
-
-      return undefined;
-    };
+    const pickRaycaster = new THREE.Raycaster();
+    const pickPointer = new THREE.Vector2();
 
     const publishRobotStatuses = (force = false) => {
       const now = performance.now();
+
       if (!force && now - lastRobotStatusPublish < 250) return;
 
       lastRobotStatusPublish = now;
-      const floorZ = currentFloorZ;
+
       setRobotStatuses(
         Array.from(robots.values()).map((robot) =>
-          toRobotStatus(robot, floorZ),
+          toRobotStatus(robot, currentFloorZ),
         ),
       );
     };
 
-    const removeRobot = (id: string) => {
-      const robot = robots.get(id);
-      if (!robot) return;
-
-      scene.remove(robot.root);
-      disposeObject3D(robot.root);
-
-      if (robot.trail) {
-        scene.remove(robot.trail.group);
-        disposeRobotTrail(robot.trail);
-      }
-
-      robots.delete(id);
-    };
-
-    const createRobot = (
-      config: RobotConfig,
-      template: THREE.Group,
-      floorZ: number,
-    ) => {
-      const visual = cloneRobotTemplate(template);
-      // Match the main floor-plan rotation: GLB is usually Y-up, this viewer is Z-up.
-      visual.rotation.x = Math.PI / 2;
-      tuneMaterials(visual);
-
-      const root = new THREE.Group();
-      root.name = `robot:${config.id}`;
-      root.add(visual);
-      applyRobotScale(root, config.scale);
-
-      const position = getInitialRobotPosition(config, floorZ);
-      root.position.set(position.x, position.y, position.z);
-      root.rotation.z = config.rotationZ ?? 0;
-
-      scene.add(root);
-
-      const trail = createRobotTrail(config, floorZ, root.position);
-      scene.add(trail.group);
-
-      const runtime: RobotRuntime = {
-        id: config.id,
-        name: config.name ?? config.id,
-        root,
-        config,
-        pathIndex: getInitialPathIndex(config),
-        driveState: null,
-        status: config.enabled === false ? 'disabled' : 'idle',
-        lastConfigPositionKey: coordKey(config.position),
-        lastConfigPathKey: pathKey(config.path),
-        lastConfigTrailKey: robotTrailKey(config),
-        trail,
-      };
-
-      robots.set(config.id, runtime);
-      return runtime;
-    };
-
-    const syncRobotsFromConfig = (
-      configs: RobotConfig[],
-      template: THREE.Group,
-      floorZ: number,
-    ) => {
-      const nextIds = new Set(configs.map((config) => config.id));
-
-      for (const id of Array.from(robots.keys())) {
-        if (!nextIds.has(id)) removeRobot(id);
-      }
-
-      for (const config of configs) {
-        const existing = robots.get(config.id);
-
-        if (!existing) {
-          createRobot(config, template, floorZ);
-          continue;
-        }
-
-        existing.name = config.name ?? config.id;
-        existing.config = config;
-        existing.blockedBy = undefined;
-        if (config.enabled === false) {
-          existing.status = 'disabled';
-        }
-
-        const nextPathKey = pathKey(config.path);
-        if (nextPathKey !== existing.lastConfigPathKey) {
-          existing.pathIndex = getInitialPathIndex(config);
-          existing.lastConfigPathKey = nextPathKey;
-          existing.driveState = null;
-        }
-
-        const nextTrailKey = robotTrailKey(config);
-
-        if (nextTrailKey !== existing.lastConfigTrailKey) {
-          if (existing.trail) {
-            scene.remove(existing.trail.group);
-            disposeRobotTrail(existing.trail);
-          }
-
-          existing.trail = createRobotTrail(
-            config,
-            floorZ,
-            existing.root.position,
-          );
-
-          scene.add(existing.trail.group);
-          existing.lastConfigTrailKey = nextTrailKey;
-        }
-
-        const nextPositionKey = coordKey(config.position);
-        if (
-          nextPositionKey &&
-          nextPositionKey !== existing.lastConfigPositionKey
-        ) {
-          const position = configCoordsToWorld(
-            config.position,
-            {
-              x: existing.root.position.x,
-              y: existing.root.position.y,
-              z: floorZ,
-            },
-            config.coordinateSystem ?? 'navigation',
-          );
-          existing.root.position.set(position.x, position.y, position.z);
-          existing.pathIndex = getInitialPathIndex(config);
-          existing.lastConfigPositionKey = nextPositionKey;
-          existing.driveState = null;
-        }
-
-        applyRobotScale(existing.root, config.scale);
-      }
-
-      publishRobotStatuses(true);
-    };
-
-    const resetAllRobotsToStart = () => {
-      for (const robot of robots.values()) {
-        const startPosition = getInitialRobotPosition(
-          robot.config,
-          currentFloorZ,
-        );
-
-        robot.root.position.set(
-          startPosition.x,
-          startPosition.y,
-          startPosition.z,
-        );
-        robot.root.rotation.z = robot.config.rotationZ
-          ? robot.config.rotationZ + ROBOT_MODEL_HEADING_OFFSET
-          : ROBOT_MODEL_HEADING_OFFSET;
-
-        robot.pathIndex = getInitialPathIndex(robot.config);
-        robot.driveState = null;
-        robot.blockedBy = undefined;
-        robot.status = robot.config.enabled === false ? 'disabled' : 'idle';
-
-        resetRobotTrail(robot);
-      }
-
-      publishRobotStatuses(true);
-    };
-
-    resetRobotsRef.current = resetAllRobotsToStart;
-
     const refreshRobotConfig = async (floorZ: number) => {
-      if (!robotTemplate) return;
+      const template = robotTemplate;
+
+      if (!template) return;
 
       try {
         const configs = await fetchRobotConfigs();
+
         if (disposed) return;
-        syncRobotsFromConfig(configs, robotTemplate, floorZ);
+
+        syncRobotsFromConfig({
+          configs,
+          scene,
+          robots,
+          template,
+          floorZ,
+          publishRobotStatuses,
+        });
       } catch (robotConfigError) {
         console.error('Robot config failed to load', robotConfigError);
       }
@@ -1154,27 +260,37 @@ export function SceneViewer() {
         if (!activeTarget) continue;
 
         const { target } = activeTarget;
+
         const previousPosition = robot.root.position.clone();
-        const previousHeading =
-          robot.root.rotation.z + ROBOT_MODEL_HEADING_OFFSET;
+        const previousModelHeading = robot.root.rotation.z;
+        const previousMovementHeading =
+          modelHeadingToMovementHeading(previousModelHeading);
+
         const stepResult = stepDirectlyTowardWaypoint({
           current: previousPosition,
           target,
           speed: Math.max(robot.config.speed ?? 1, 0),
           deltaSeconds,
           arrivalEpsilon: ROBOT_ARRIVAL_EPSILON,
-          previousHeading,
+          previousHeading: previousMovementHeading,
         });
 
         robot.root.position.copy(stepResult.position);
-        robot.root.rotation.z = stepResult.heading + ROBOT_MODEL_HEADING_OFFSET;
+        robot.root.rotation.z = movementHeadingToModelHeading(
+          stepResult.heading,
+        );
+
         robot.driveState = null;
 
-        const blockedBy = findRobotCollision(robot);
+        const blockedBy = findRobotCollision({
+          robot,
+          robots,
+          staticCollisionBoxes,
+        });
 
         if (blockedBy) {
           robot.root.position.copy(previousPosition);
-          robot.root.rotation.z = previousHeading;
+          robot.root.rotation.z = previousModelHeading;
           robot.driveState = null;
           robot.blockedBy = blockedBy;
           robot.status = 'blocked';
@@ -1182,8 +298,6 @@ export function SceneViewer() {
         }
 
         if (stepResult.arrived) {
-          robot.driveState = null;
-
           const pathLength = robot.config.path?.length ?? 0;
 
           if (pathLength > 0) {
@@ -1206,58 +320,28 @@ export function SceneViewer() {
 
         robot.status = 'moving';
         updateRobotTrail(robot);
-
-        // if (stepResult.arrived) {
-        //   robot.driveState = null;
-
-        //   const pathLength = robot.config.path?.length ?? 0;
-        //   if (pathLength > 0) {
-        //     if (robot.pathIndex < pathLength - 1) {
-        //       robot.pathIndex += 1;
-        //       robot.status = 'moving';
-        //     } else if (robot.config.loop) {
-        //       robot.pathIndex = 0;
-        //       robot.status = 'moving';
-        //     } else {
-        //       robot.status = 'arrived';
-        //     }
-        //   } else {
-        //     robot.status = 'idle';
-        //   }
-
-        //   continue;
-        // }
-
-        // const blockedBy = findRobotCollision(robot);
-        // if (blockedBy) {
-        //   robot.root.position.copy(previousPosition);
-        //   robot.root.rotation.z = previousHeading;
-        //   robot.driveState = null;
-        //   robot.blockedBy = blockedBy;
-        //   robot.status = 'blocked';
-        // } else if (stepResult.mode === 'turn' || stepResult.mode === 'drive') {
-        //   robot.status = 'moving';
-        // }
-
-        // updateRobotTrail(robot);
       }
 
       publishRobotStatuses();
     };
 
     const onDropPointPointerDown = (event: PointerEvent) => {
-      if (!showDropPointRef.current || !event.altKey || !dropPointMarker)
+      if (!showDropPointRef.current || !event.altKey || !dropPointMarker) {
         return;
+      }
 
       const rect = renderer.domElement.getBoundingClientRect();
+
       pickPointer.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
       pickPointer.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+
       pickRaycaster.setFromCamera(pickPointer, camera);
 
       const picked = dropPointMarker.pickOnPlane(
         pickRaycaster,
         dropPointRef.current.z,
       );
+
       if (!picked) return;
 
       dropPointRef.current = picked;
@@ -1268,10 +352,12 @@ export function SceneViewer() {
     const resize = () => {
       const width = container.clientWidth;
       const height = container.clientHeight;
+
       if (width === 0 || height === 0) return;
 
       camera.aspect = width / height;
       camera.updateProjectionMatrix();
+
       renderer.setSize(width, height);
       gizmo.update();
     };
@@ -1284,16 +370,18 @@ export function SceneViewer() {
 
     const animate = () => {
       if (disposed) return;
+
       animationFrameId = requestAnimationFrame(animate);
+
       const deltaSeconds = clock.getDelta();
 
       controls.update();
-
       updateRobots(deltaSeconds, currentFloorZ);
 
       renderer.render(scene, camera);
       gizmo.render();
     };
+
     animate();
 
     loader.load(
@@ -1302,17 +390,21 @@ export function SceneViewer() {
         if (disposed) return;
 
         loadedScene = gltf.scene;
-        // GLTF is Y-up by spec; rotate to Z-up world convention (+Z vertical).
+
+        // GLTF is usually Y-up; rotate to Z-up world convention.
         gltf.scene.rotation.x = Math.PI / 2;
+
         tuneMaterials(gltf.scene);
         scene.add(gltf.scene);
 
         const bounds = computeSceneBounds(gltf.scene);
         currentFloorZ = bounds.floorZ;
+
         staticCollisionBoxes = collectStaticCollisionBoxes(
           gltf.scene,
           bounds.floorZ,
         );
+
         gridAxesHelpers = createGridAxesHelpers(bounds);
         scene.add(gridAxesHelpers);
 
@@ -1324,23 +416,30 @@ export function SceneViewer() {
           y: (bounds.min.y + bounds.max.y) / 2,
           z: bounds.floorZ,
         };
+
         dropPointRef.current = initialDrop;
         dropPointMarker.setPosition(initialDrop);
         setDropPoint(initialDrop);
 
         sceneApiRef.current = {
           setShowGridAxes(show) {
-            if (gridAxesHelpers) gridAxesHelpers.visible = show;
+            if (gridAxesHelpers) {
+              gridAxesHelpers.visible = show;
+            }
           },
+
           setDropPointEnabled(enabled) {
             dropPointMarker?.setVisible(enabled);
           },
+
           setDropPointPosition(position) {
             dropPointMarker?.setPosition(position);
           },
+
           setRoofSliceEnabled(enabled) {
             renderer.clippingPlanes = enabled ? [roofClipPlane] : [];
           },
+
           setRoofSliceHeight(height) {
             roofClipPlane.constant = height;
           },
@@ -1349,6 +448,7 @@ export function SceneViewer() {
         setSceneDebug(toSceneDebugInfo(bounds));
 
         const frame = computeCameraFrame(gltf.scene);
+
         resetOrbitRef.current = () => {
           frameCamera(camera, controls, gltf.scene);
         };
@@ -1356,7 +456,9 @@ export function SceneViewer() {
         try {
           robotTemplate = await loadGltfAsync(loader, ROBOT_MODEL_URL);
           tuneMaterials(robotTemplate);
+
           await refreshRobotConfig(bounds.floorZ);
+
           robotConfigTimerId = window.setInterval(() => {
             void refreshRobotConfig(bounds.floorZ);
           }, ROBOT_CONFIG_REFRESH_MS);
@@ -1365,9 +467,7 @@ export function SceneViewer() {
           setRobotStatuses([]);
         }
 
-        if (disposed) {
-          return;
-        }
+        if (disposed) return;
 
         setLoadState('ready');
         animateIntroCamera(camera, controls, frame, () => disposed);
@@ -1375,8 +475,10 @@ export function SceneViewer() {
       undefined,
       (error) => {
         if (disposed) return;
+
         const message =
           error instanceof Error ? error.message : 'Failed to load 3D scene';
+
         setErrorMessage(message);
         setLoadState('error');
       },
@@ -1384,6 +486,7 @@ export function SceneViewer() {
 
     return () => {
       disposed = true;
+
       resetOrbitRef.current = null;
       resetRobotsRef.current = null;
       sceneApiRef.current = null;
@@ -1394,7 +497,11 @@ export function SceneViewer() {
       }
 
       for (const id of Array.from(robots.keys())) {
-        removeRobot(id);
+        removeRobot({
+          id,
+          scene,
+          robots,
+        });
       }
 
       if (robotTemplate) {
@@ -1425,12 +532,15 @@ export function SceneViewer() {
       if (loadedScene) {
         disposeObject3D(loadedScene);
         scene.remove(loadedScene);
+        loadedScene = null;
       }
 
       setSceneDebug(null);
 
       gizmo.dispose();
+
       THREE.Object3D.DEFAULT_UP.copy(previousDefaultUp);
+
       controls.dispose();
       renderer.dispose();
       dracoLoader.dispose();
@@ -1460,6 +570,7 @@ export function SceneViewer() {
           </Text>
         </Center>
       )}
+
       <Stack
         position="absolute"
         top={3}
@@ -1470,144 +581,26 @@ export function SceneViewer() {
         pointerEvents="none"
         maxW={{ base: 'calc(100% - 160px)', md: '280px' }}
       >
-        <Box
-          px={2.5}
-          py={2}
-          rounded="md"
-          bg="bg/90"
-          borderWidth="1px"
-          borderColor="border.subtle"
-          backdropFilter="blur(4px)"
-          pointerEvents="auto"
-        >
-          <Stack gap={2}>
-            <Switch.Root
-              size="sm"
-              colorPalette="blue"
-              checked={showGridAxes}
-              disabled={loadState !== 'ready'}
-              onCheckedChange={(details) => setShowGridAxes(details.checked)}
-            >
-              <Switch.HiddenInput />
-              <Switch.Control>
-                <Switch.Thumb />
-              </Switch.Control>
-              <Switch.Label fontSize="sm">Grid &amp; axes</Switch.Label>
-            </Switch.Root>
-            <Switch.Root
-              size="sm"
-              colorPalette="yellow"
-              checked={showDropPoint}
-              disabled={loadState !== 'ready'}
-              onCheckedChange={(details) => setShowDropPoint(details.checked)}
-            >
-              <Switch.HiddenInput />
-              <Switch.Control>
-                <Switch.Thumb />
-              </Switch.Control>
-              <Switch.Label fontSize="sm">Drop point</Switch.Label>
-            </Switch.Root>
-            <Switch.Root
-              size="sm"
-              colorPalette="orange"
-              checked={showRoofSlice}
-              disabled={loadState !== 'ready'}
-              onCheckedChange={(details) => setShowRoofSlice(details.checked)}
-            >
-              <Switch.HiddenInput />
-              <Switch.Control>
-                <Switch.Thumb />
-              </Switch.Control>
-              <Switch.Label fontSize="sm">Slice roof</Switch.Label>
-            </Switch.Root>
-          </Stack>
-        </Box>
-        {showRoofSlice && (
-          <Field.Root>
-            <Field.Label fontSize="xs">Roof slice Z height</Field.Label>
-            <Input
-              size="sm"
-              type="number"
-              step="0.1"
-              fontFamily="mono"
-              value={roofSliceHeight}
-              onChange={(e) => {
-                const value = Number.parseFloat(e.target.value);
-                if (!Number.isNaN(value)) setRoofSliceHeight(value);
-              }}
-            />
-          </Field.Root>
-        )}
+        <SceneControlPanel
+          loadState={loadState}
+          showGridAxes={showGridAxes}
+          onShowGridAxesChange={setShowGridAxes}
+          showDropPoint={showDropPoint}
+          onShowDropPointChange={setShowDropPoint}
+          showRoofSlice={showRoofSlice}
+          onShowRoofSliceChange={setShowRoofSlice}
+          roofSliceHeight={roofSliceHeight}
+          onRoofSliceHeightChange={setRoofSliceHeight}
+        />
+
         {showDropPoint && (
-          <Card.Root
-            size="sm"
-            variant="outline"
-            bg="bg/90"
-            backdropFilter="blur(4px)"
-            pointerEvents="auto"
-            w="full"
-          >
-            <Card.Body gap={3} py={3}>
-              <Text fontSize="sm" fontWeight="semibold">
-                Drop point
-              </Text>
-              <Text fontSize="xs" color="fg.muted" lineHeight="short">
-                World X, Y on the floor plane; Z is vertical (blue axis = Z up).
-                Alt+click sets X and Y on the plane at the current Z.
-              </Text>
-              <Stack gap={2}>
-                {(['x', 'y', 'z'] as const).map((axis) => (
-                  <Field.Root key={axis}>
-                    <Field.Label fontSize="xs" textTransform="uppercase">
-                      {axis}
-                    </Field.Label>
-                    <Input
-                      size="sm"
-                      type="number"
-                      step="0.1"
-                      fontFamily="mono"
-                      value={dropPoint[axis]}
-                      onChange={(e) => {
-                        const value = Number.parseFloat(e.target.value);
-                        if (Number.isNaN(value)) return;
-                        setDropPoint((prev) => ({ ...prev, [axis]: value }));
-                      }}
-                    />
-                  </Field.Root>
-                ))}
-              </Stack>
-              {sceneDebug && (
-                <Button
-                  size="xs"
-                  variant="outline"
-                  colorPalette="gray"
-                  onClick={() =>
-                    setDropPoint((prev) => ({
-                      ...prev,
-                      z: sceneDebug.floorZ,
-                    }))
-                  }
-                >
-                  Snap Z to floor ({formatCoord(sceneDebug.floorZ)})
-                </Button>
-              )}
-              <Box
-                px={2}
-                py={1.5}
-                rounded="md"
-                bg="bg.subtle"
-                borderWidth="1px"
-                borderColor="border.subtle"
-                fontFamily="mono"
-                fontSize="xs"
-                color="fg.muted"
-                wordBreak="break-all"
-              >
-                {`"x": ${formatCoord(dropPoint.x)}, "y": ${formatCoord(dropPoint.y)}, "z": ${formatCoord(dropPoint.z)}`}
-              </Box>
-            </Card.Body>
-          </Card.Root>
+          <DropPointPanel
+            dropPoint={dropPoint}
+            setDropPoint={setDropPoint}
+            sceneDebug={sceneDebug}
+          />
         )}
+
         {showGridAxes && sceneDebug && (
           <Card.Root
             size="sm"
@@ -1621,22 +614,26 @@ export function SceneViewer() {
               <Text fontSize="sm" fontWeight="semibold">
                 Floor reference
               </Text>
+
               <Text fontSize="sm" color="fg.muted">
                 Floor Z height:{' '}
                 <Text as="span" fontFamily="mono" color="fg">
                   {formatCoord(sceneDebug.floorZ)}
                 </Text>
               </Text>
+
               <Text fontSize="xs" color="fg.muted" lineHeight="short">
                 Red = +X, green = +Y, blue = +Z. Read vertex positions from the
                 grid; bounds min Z is the floor level.
               </Text>
+
               <Stack gap={0.5} fontFamily="mono" fontSize="xs" color="fg.muted">
                 <Text>
                   min ({formatCoord(sceneDebug.min.x)},{' '}
                   {formatCoord(sceneDebug.min.y)},{' '}
                   {formatCoord(sceneDebug.min.z)})
                 </Text>
+
                 <Text>
                   max ({formatCoord(sceneDebug.max.x)},{' '}
                   {formatCoord(sceneDebug.max.y)},{' '}
@@ -1647,108 +644,9 @@ export function SceneViewer() {
           </Card.Root>
         )}
       </Stack>
-      {/* Robot status overlay  */}
-      <Card.Root
-        size="sm"
-        variant="outline"
-        position="absolute"
-        top="96px"
-        right={3}
-        zIndex={2}
-        bg="bg/90"
-        backdropFilter="blur(4px)"
-        pointerEvents="auto"
-        minW="240px"
-        maxW="300px"
-        maxH="calc(100% - 112px)"
-        overflowY="auto"
-      >
-        <Card.Body gap={2.5} py={3}>
-          <HStack justify="space-between" align="center">
-            <Text fontSize="sm" fontWeight="semibold">
-              Robots
-            </Text>
-            <Text fontSize="xs" color="fg.muted">
-              {robotStatuses.length} total
-            </Text>
-          </HStack>
-          {robotStatuses.length === 0 ? (
-            <Text fontSize="xs" color="fg.muted" lineHeight="short">
-              No robots loaded. Add /public/robot.glb and /public/robots.json.
-            </Text>
-          ) : (
-            <Stack gap={2}>
-              {robotStatuses.map((robot) => (
-                <Box
-                  key={robot.id}
-                  px={2}
-                  py={1.5}
-                  rounded="md"
-                  bg="bg.subtle"
-                  borderWidth="1px"
-                  borderColor="border.subtle"
-                >
-                  <HStack justify="space-between" align="start" gap={3}>
-                    <Box>
-                      <Text fontSize="xs" fontWeight="semibold">
-                        {robot.name}
-                      </Text>
-                      <Text fontSize="xs" color="fg.muted" fontFamily="mono">
-                        {robot.id}
-                      </Text>
-                    </Box>
-                    <Text
-                      fontSize="xs"
-                      fontWeight="semibold"
-                      textTransform="uppercase"
-                      color={
-                        robot.status === 'blocked'
-                          ? 'fg.error'
-                          : robot.status === 'moving'
-                            ? 'blue.500'
-                            : robot.status === 'arrived'
-                              ? 'green.500'
-                              : 'fg.muted'
-                      }
-                    >
-                      {robot.status}
-                    </Text>
-                  </HStack>
-                  <Text mt={1} fontSize="xs" color="fg.muted" fontFamily="mono">
-                    x {formatCoord(robot.position.x)} · y{' '}
-                    {formatCoord(robot.position.y)} · z{' '}
-                    {formatCoord(robot.position.z)}
-                  </Text>
-                  {robot.waypointCount !== undefined && (
-                    <Text mt={1} fontSize="xs" color="fg.muted">
-                      Waypoint {(robot.waypointIndex ?? 0) + 1}/
-                      {robot.waypointCount}:{' '}
-                      {robot.waypointLabel ?? robot.waypointId}
-                    </Text>
-                  )}
-                  {robot.target && (
-                    <Text
-                      mt={1}
-                      fontSize="xs"
-                      color="fg.muted"
-                      fontFamily="mono"
-                    >
-                      → x {formatCoord(robot.target.x)} · y{' '}
-                      {formatCoord(robot.target.y)} · z{' '}
-                      {formatCoord(robot.target.z)}
-                    </Text>
-                  )}
-                  {robot.blockedBy && (
-                    <Text mt={1} fontSize="xs" color="fg.error">
-                      Blocked by {robot.blockedBy}
-                    </Text>
-                  )}
-                </Box>
-              ))}
-            </Stack>
-          )}
-        </Card.Body>
-      </Card.Root>
+
+      <RobotStatusPanel robots={robotStatuses} />
+
       <HStack
         position="absolute"
         bottom={3}
@@ -1777,6 +675,7 @@ export function SceneViewer() {
             <LuLocateFixed />
           </IconButton>
         </Tooltip>
+
         <Tooltip content="Reset all robots" showArrow>
           <Button
             size="sm"
@@ -1789,6 +688,7 @@ export function SceneViewer() {
             Reset robots
           </Button>
         </Tooltip>
+
         <Box
           px={2.5}
           py={1.5}
